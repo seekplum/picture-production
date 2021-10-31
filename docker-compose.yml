@@ -1,0 +1,15 @@
+version: "3.8"
+services:
+  server:
+    build: ./
+    image: seekplum/picture-production:test
+    ports:
+      - 8000:8000
+    environment:
+      TMPDIR: "/tmp-images"
+    ulimits:
+      nofile:
+        soft: "65536"
+        hard: "65536"
+    sysctls:
+      net.ipv4.tcp_tw_reuse: 1

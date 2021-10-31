@@ -1,0 +1,5 @@
+vendor/
+.idea/*
+.vscode/*
+images/dst.png
+images/resize_avatar.png
