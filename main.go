@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"image"
 	"image/draw"
@@ -10,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path"
+	"strings"
 	"time"
 
 	"bytes"
@@ -22,6 +24,8 @@ import (
 
 const DEFAULT_MAX_WIDTH float64 = 300
 const DEFAULT_MAX_HEIGHT float64 = 300
+const HAT_IMAGE_NAME string = "hat.png"
+const DEMO_IMAGE_NAME string = "demo.png"
 
 type imgResponse struct {
 	code int
@@ -35,13 +39,16 @@ func calculateRatioFit(srcWidth, srcHeight int) (int, int) {
 	return int(math.Ceil(float64(srcWidth) * ratio)), int(math.Ceil(float64(srcHeight) * ratio))
 }
 
-func getImgSize(imgPath string) (int, int, image.Image, error) {
-	imageFile, err := os.Open(imgPath)
-	if err != nil {
-		return 0, 0, nil, err
-	}
-	defer imageFile.Close()
-	img, err := png.Decode(imageFile)
+func getImageDirectory() string {
+	// 获取当前路径
+	pwd, _ := os.Getwd()
+	// 图片路径
+	imgDir := path.Join(pwd, "images")
+	return imgDir
+}
+
+func getImgSize(imgBuf *bytes.Buffer) (int, int, image.Image, error) {
+	img, err := png.Decode(imgBuf)
 	if err != nil {
 		return 0, 0, nil, err
 	}
@@ -52,24 +59,25 @@ func getImgSize(imgPath string) (int, int, image.Image, error) {
 	return height, width, img, nil
 }
 
-func resizeImg(imgPath string) (*bytes.Buffer, error) {
-	height, width, img, err := getImgSize(imgPath)
+func resizeImg(imgBuf *bytes.Buffer) (*bytes.Buffer, error) {
+	height, width, img, err := getImgSize(imgBuf)
 	if err != nil {
 		return nil, err
 	}
+	buf := new(bytes.Buffer)
 	// 图片尺寸不对时进行调整
 	if float64(width) == DEFAULT_MAX_WIDTH && float64(height) == DEFAULT_MAX_HEIGHT {
-		content, err := ioutil.ReadFile(imgPath)
+		// PNG 数据写入 buffer
+		err = png.Encode(buf, img)
 		if err != nil {
 			return nil, err
 		}
-		return bytes.NewBuffer(content), nil
+		return buf, nil
 	}
 	w, h := calculateRatioFit(width, height)
 	// 调用resize库进行图片缩放
 	m := resize.Resize(uint(w), uint(h), img, resize.Lanczos3)
-	buf := new(bytes.Buffer)
-	// 以PNG格式保存文件
+	// PNG 数据写入 buffer
 	err = png.Encode(buf, m)
 	if err != nil {
 		return nil, err
@@ -77,14 +85,8 @@ func resizeImg(imgPath string) (*bytes.Buffer, error) {
 	return buf, nil
 }
 
-func generateAvatar() imgResponse {
-	// 获取当前路径
-	pwd, _ := os.Getwd()
-	// 图片路径
-	imgDir := path.Join(pwd, "images")
-	// 300 * 300 的背景头像图
-	originBackgroundPath := path.Join(imgDir, "avatar.png")
-	backgroundBuf, err := resizeImg(originBackgroundPath)
+func generateAvatar(imgBuf *bytes.Buffer) imgResponse {
+	backgroundBuf, err := resizeImg(imgBuf)
 	if err != nil {
 		log.Println(err)
 		return imgResponse{
@@ -102,7 +104,7 @@ func generateAvatar() imgResponse {
 	}
 
 	// 300 * 300 前景红旗图
-	foregroundPath := path.Join(imgDir, "hat.png")
+	foregroundPath := path.Join(getImageDirectory(), HAT_IMAGE_NAME)
 	foregroundImageFile, err := os.Open(foregroundPath)
 	if err != nil {
 		log.Println(err)
@@ -155,8 +157,39 @@ func generateAvatar() imgResponse {
 	}
 }
 
-func generateAvatarForBase64(c *gin.Context) {
-	response := generateAvatar()
+func getDemoImageBuffer() (*bytes.Buffer, error) {
+	// 300 * 300 的背景头像图
+	demoPath := path.Join(getImageDirectory(), DEMO_IMAGE_NAME)
+	content, err := ioutil.ReadFile(demoPath)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.NewBuffer(content), nil
+}
+
+func getUploadImage(c *gin.Context) (*bytes.Buffer, error) {
+	file, err := c.FormFile("file")
+	if err != nil {
+		return nil, err
+	}
+	fileExt := strings.ToLower(path.Ext(file.Filename))
+	if fileExt != ".png" {
+		return nil, errors.New("The file type is incorrect. Only PNG format is supported")
+	}
+	fileContent, err := file.Open()
+	defer fileContent.Close()
+	if err != nil {
+		return nil, err
+	}
+	fileBytes, err := ioutil.ReadAll(fileContent)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.NewBuffer(fileBytes), nil
+}
+
+func renderBase64(imgBuf *bytes.Buffer, c *gin.Context) {
+	response := generateAvatar(imgBuf)
 	if response.code != 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"code": response.code, "msg": response.msg})
 		return
@@ -173,15 +206,54 @@ func generateAvatarForBase64(c *gin.Context) {
 	return
 
 }
-
-func generateAvatarForImg(c *gin.Context) {
-	response := generateAvatar()
+func renderImgFile(imgBuf *bytes.Buffer, c *gin.Context) {
+	response := generateAvatar(imgBuf)
 	if response.code != 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"code": response.code, "msg": response.msg})
 		return
 	}
 	c.Header("Content-Type", "image/jpeg")
 	c.Data(http.StatusOK, "application/octet-stream", response.buf.Bytes())
+	return
+}
+
+func generateDemoAvatarForBase64(c *gin.Context) {
+	demoBuf, err := getDemoImageBuffer()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 10031, "msg": err.Error()})
+		return
+	}
+	renderBase64(demoBuf, c)
+	return
+}
+
+func generateDemoAvatarForImg(c *gin.Context) {
+	demoBuf, err := getDemoImageBuffer()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 10041, "msg": err.Error()})
+		return
+	}
+	renderImgFile(demoBuf, c)
+	return
+}
+
+func generateAvatarForBase64(c *gin.Context) {
+	imgBuf, err := getUploadImage(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 10051, "msg": err.Error()})
+		return
+	}
+	renderBase64(imgBuf, c)
+	return
+}
+
+func generateAvatarForImg(c *gin.Context) {
+	imgBuf, err := getUploadImage(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 10061, "msg": err.Error()})
+		return
+	}
+	renderImgFile(imgBuf, c)
 	return
 }
 
@@ -214,7 +286,9 @@ func main() {
 
 	r := gin.New()
 	r.Use(RequestLoggerMiddleware())
-	r.GET("/render/base64", generateAvatarForBase64)
-	r.GET("/render/img", generateAvatarForImg)
+	r.GET("/render/demo/base64", generateDemoAvatarForBase64)
+	r.GET("/render/demo/img", generateDemoAvatarForImg)
+	r.POST("/render/base64", generateAvatarForBase64)
+	r.POST("/render/img", generateAvatarForImg)
 	r.Run(host)
 }
