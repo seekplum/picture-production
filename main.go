@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"image"
 	"image/draw"
 	"image/png"
@@ -9,8 +10,9 @@ import (
 	"math"
 	"os"
 	"path"
+	"time"
 
-	"bufio"
+	"bytes"
 	"encoding/base64"
 	"net/http"
 
@@ -24,7 +26,7 @@ const DEFAULT_MAX_HEIGHT float64 = 300
 type imgResponse struct {
 	code int
 	msg  string
-	path string
+	buf  *bytes.Buffer
 }
 
 // 计算图片缩放后的尺寸
@@ -50,42 +52,39 @@ func getImgSize(imgPath string) (int, int, image.Image, error) {
 	return height, width, img, nil
 }
 
-func resizeImg(imgPath, resizeImgPath string) (string, error) {
+func resizeImg(imgPath string) (*bytes.Buffer, error) {
 	height, width, img, err := getImgSize(imgPath)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	// 图片尺寸不对时进行调整
 	if float64(width) == DEFAULT_MAX_WIDTH && float64(height) == DEFAULT_MAX_HEIGHT {
-		return imgPath, nil
+		content, err := ioutil.ReadFile(imgPath)
+		if err != nil {
+			return nil, err
+		}
+		return bytes.NewBuffer(content), nil
 	}
 	w, h := calculateRatioFit(width, height)
 	// 调用resize库进行图片缩放
 	m := resize.Resize(uint(w), uint(h), img, resize.Lanczos3)
-	// 需要保存的文件
-	resizeImgFile, err := os.Create(resizeImgPath)
-	if err != nil {
-		return "", err
-	}
-	defer resizeImgFile.Close()
+	buf := new(bytes.Buffer)
 	// 以PNG格式保存文件
-	err = png.Encode(resizeImgFile, m)
+	err = png.Encode(buf, m)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return resizeImgPath, nil
+	return buf, nil
 }
 
-func generateAvatar(tempDir string) imgResponse {
+func generateAvatar() imgResponse {
 	// 获取当前路径
 	pwd, _ := os.Getwd()
 	// 图片路径
 	imgDir := path.Join(pwd, "images")
-
 	// 300 * 300 的背景头像图
 	originBackgroundPath := path.Join(imgDir, "avatar.png")
-	resizeBackgroundPath := path.Join(tempDir, "resize_avatar.png")
-	backgroundImagePath, err := resizeImg(originBackgroundPath, resizeBackgroundPath)
+	backgroundBuf, err := resizeImg(originBackgroundPath)
 	if err != nil {
 		log.Println(err)
 		return imgResponse{
@@ -93,16 +92,7 @@ func generateAvatar(tempDir string) imgResponse {
 			msg:  err.Error(),
 		}
 	}
-	backgroundImageFile, err := os.Open(backgroundImagePath)
-	if err != nil {
-		log.Println(err)
-		return imgResponse{
-			code: 10012,
-			msg:  err.Error(),
-		}
-	}
-	defer backgroundImageFile.Close()
-	resizeBackgroundImg, err := png.Decode(backgroundImageFile)
+	resizeBackgroundImg, err := png.Decode(backgroundBuf)
 	if err != nil {
 		log.Println(err)
 		return imgResponse{
@@ -149,18 +139,8 @@ func generateAvatar(tempDir string) imgResponse {
 		draw.Over,
 	)
 
-	dstFIlePath := path.Join(tempDir, "dst.png")
-	// 目标图片
-	dstFile, err := os.Create(dstFIlePath)
-	if err != nil {
-		log.Println(err)
-		return imgResponse{
-			code: 10031,
-			msg:  err.Error(),
-		}
-	}
-	defer dstFile.Close()
-	if err := png.Encode(dstFile, newPng); nil != err {
+	buf := new(bytes.Buffer)
+	if err := png.Encode(buf, newPng); nil != err {
 		log.Println("output new image with error: ", err)
 		return imgResponse{
 			code: 10032,
@@ -171,40 +151,18 @@ func generateAvatar(tempDir string) imgResponse {
 	return imgResponse{
 		code: 0,
 		msg:  "",
-		path: dstFIlePath,
+		buf:  buf,
 	}
 }
 
 func generateAvatarForBase64(c *gin.Context) {
-	tempDir, err := ioutil.TempDir("", "gen-avatar-base64")
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": 10041, "msg": err.Error()})
-		return
-	}
-	defer os.RemoveAll(tempDir)
-	response := generateAvatar(tempDir)
+	response := generateAvatar()
 	if response.code != 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"code": response.code, "msg": response.msg})
 		return
 	}
-	imgFile, err := os.Open(response.path)
-	if err != nil {
-		log.Println(err)
-		c.JSON(http.StatusBadRequest, gin.H{"code": 10042, "msg": err.Error()})
-		return
-	}
-
-	// 根据文件大小创建一个新的缓冲区
-	imgInfo, _ := imgFile.Stat()
-	var size int64 = imgInfo.Size()
-	buf := make([]byte, size)
-
-	// 将文件内容读入缓冲区
-	imgReader := bufio.NewReader(imgFile)
-	imgReader.Read(buf)
-
 	// 转成 string
-	base64Str := base64.StdEncoding.EncodeToString(buf)
+	base64Str := base64.StdEncoding.EncodeToString(response.buf.Bytes())
 
 	// 处理图片格式
 	imgBase64 := "data:image/png;base64," + base64Str
@@ -217,29 +175,46 @@ func generateAvatarForBase64(c *gin.Context) {
 }
 
 func generateAvatarForImg(c *gin.Context) {
-	tempDir, err := ioutil.TempDir("", "gen-avatar-img")
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": 10051, "msg": err.Error()})
-		return
-	}
-	defer os.RemoveAll(tempDir)
-	response := generateAvatar(tempDir)
+	response := generateAvatar()
 	if response.code != 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"code": response.code, "msg": response.msg})
 		return
 	}
 	c.Header("Content-Type", "image/jpeg")
-	c.File(response.path)
+	c.Data(http.StatusOK, "application/octet-stream", response.buf.Bytes())
 	return
+}
+
+func RequestLoggerMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		c.Next()
+		duration := time.Since(start)
+		log.Printf("method: %s, uri: %s, duration: %s", c.Request.Method, c.Request.URL.Path, duration)
+	}
+}
+
+func getEnvDefault(key, defaultVal string) string {
+	val, ex := os.LookupEnv(key)
+	if !ex {
+		return defaultVal
+	}
+	return val
 }
 
 func main() {
 	// 设置日志格式
 	log.SetFlags(log.Lshortfile | log.LstdFlags)
-
 	log.SetOutput(os.Stderr)
+
+	defaultHost := getEnvDefault("HOST", ":8089")
+	var host string
+	flag.StringVar(&host, "host", defaultHost, "绑定的端口号")
+	flag.Parse()
+
 	r := gin.New()
+	r.Use(RequestLoggerMiddleware())
 	r.GET("/render/base64", generateAvatarForBase64)
 	r.GET("/render/img", generateAvatarForImg)
-	r.Run(":8000")
+	r.Run(host)
 }
