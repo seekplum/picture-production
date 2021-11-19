@@ -5,7 +5,9 @@ import (
 	"flag"
 	"image"
 	"image/draw"
+	"image/jpeg"
 	"image/png"
+	"io"
 	"io/ioutil"
 	"log"
 	"math"
@@ -85,6 +87,20 @@ func resizeImg(imgBuf *bytes.Buffer) (*bytes.Buffer, error) {
 	return buf, nil
 }
 
+func isPng(r io.Reader) error {
+	const pngHeader = "\x89PNG\r\n\x1a\n"
+	const headLength = len(pngHeader)
+	var tmp [headLength]byte
+	_, err := io.ReadFull(r, tmp[:headLength])
+	if err != nil {
+		return err
+	}
+	if string(tmp[:headLength]) != pngHeader {
+		return errors.New("not a PNG file")
+	}
+	return nil
+}
+
 func generateAvatar(imgBuf *bytes.Buffer) imgResponse {
 	backgroundBuf, err := resizeImg(imgBuf)
 	if err != nil {
@@ -157,6 +173,25 @@ func generateAvatar(imgBuf *bytes.Buffer) imgResponse {
 	}
 }
 
+func covertImage(content []byte) (*bytes.Buffer, error) {
+	pngErr := isPng(bytes.NewBuffer(content))
+	// PNG 格式直接返回
+	if pngErr == nil {
+		return bytes.NewBuffer(content), nil
+	}
+	// 读取 jpg 格式内容写入 png 中
+	img, err := jpeg.Decode(bytes.NewReader(content))
+	if err != nil {
+		return nil, err
+	}
+	buf := new(bytes.Buffer)
+	// jpg 格式转成 png 格式
+	if err := png.Encode(buf, img); err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
 func getDemoImageBuffer() (*bytes.Buffer, error) {
 	// 300 * 300 的背景头像图
 	demoPath := path.Join(getImageDirectory(), DEMO_IMAGE_NAME)
@@ -164,7 +199,7 @@ func getDemoImageBuffer() (*bytes.Buffer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return bytes.NewBuffer(content), nil
+	return covertImage(content)
 }
 
 func getUploadImage(c *gin.Context) (*bytes.Buffer, error) {
@@ -173,8 +208,8 @@ func getUploadImage(c *gin.Context) (*bytes.Buffer, error) {
 		return nil, err
 	}
 	fileExt := strings.ToLower(path.Ext(file.Filename))
-	if fileExt != ".png" {
-		return nil, errors.New("The file type is incorrect. Only PNG format is supported")
+	if fileExt != ".png" && fileExt != ".jpg" && fileExt != ".jpeg" {
+		return nil, errors.New("The file type is incorrect. Only PNG/JPG format is supported")
 	}
 	fileContent, err := file.Open()
 	defer fileContent.Close()
@@ -185,7 +220,7 @@ func getUploadImage(c *gin.Context) (*bytes.Buffer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return bytes.NewBuffer(fileBytes), nil
+	return covertImage(fileBytes)
 }
 
 func renderBase64(imgBuf *bytes.Buffer, c *gin.Context) {
